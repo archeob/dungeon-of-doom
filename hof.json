@@ -1,0 +1,15 @@
+[
+  {
+    "game_id": 4545765,
+    "name": "Arax",
+    "class_key": "sage",
+    "class_name": "Sage",
+    "char_level": 1,
+    "dungeon_floor": 2,
+    "glory": 768,
+    "outcome": "Slain by Caveman",
+    "turns": 438,
+    "date": "2026-03-24",
+    "difficulty": "adventurer"
+  }
+]
