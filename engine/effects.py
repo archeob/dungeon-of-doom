@@ -405,8 +405,13 @@ def fire_wand_at_direction(game, item: dict, dx: int, dy: int) -> tuple:
                 target.dmg_min, target.dmg_max = new_m["damage"]
                 target.ac    = new_m["ac"]
                 target.xp    = new_m["xp"]
-                target.max_hp = new_m["hp"]
-                target.hp    = max(1, int(new_m["hp"] * hp_ratio))
+                if new_m.get("hp_fixed") is not None:
+                    new_max_hp = new_m["hp_fixed"]
+                else:
+                    n, s = new_m["hp_dice"]
+                    new_max_hp = max(1, sum(game.rng.randint(1, s) for _ in range(n)))
+                target.max_hp = new_max_hp
+                target.hp    = max(1, int(new_max_hp * hp_ratio))
                 msg = f"The {old_name} transforms into a {target.name}!"; col = C_LTEXT_ACCENT
         else:
             msg = "The beam dissipates."; col = C_LTEXT_DIM
