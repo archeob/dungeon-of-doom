@@ -16,9 +16,12 @@ from constants import (
     PASSABLE, BOULDER_MIN_STR,
     DIFF_EXPLORER, DIFF_ADVENTURER, DIFF_HERO, DIFF_ARCHITECT,
     GK_BARRIER_FLOORS, GK_HP_TABLE, GK_AC_TABLE, GK_ATK_TABLE,
+    FOOD_OVERSTAY_WARN, FOOD_OVERSTAY_HEAVY,
+    FOOD_OVERSTAY_MULT_WARN, FOOD_OVERSTAY_MULT_HEAVY,
 )
 from engine.dungeon import FloorCache, DungeonLevel
 from engine.fov import FovMap
+from engine.audio import get_audio
 from entities.player import Player
 from entities.monster import Monster
 from entities.item import Item
@@ -73,7 +76,7 @@ class GameState:
         self.wish_input:  str       = ""     # text being typed in wish popup
         self.quick_use_cat: str     = ""     # category for quick-use submenu
         self._encumber_skip: bool   = False  # alternating skip when encumbered
-        self._stuffed_skip:  bool   = False  # alternating skip when stuffed
+        self._stuffed_skip:  int    = 0   # step counter for stuffed penalty (fires every 4th)
         self._ring_slow_skip: bool  = False  # alternating skip from ring of slowness
         self.pending_wand:  dict    = None   # wand item awaiting direction in PHASE_WAND_AIM
         self.pending_throw: dict    = None   # throw item awaiting direction in PHASE_THROW_AIM
@@ -153,7 +156,7 @@ class GameState:
         self.phase   = PHASE_PLAYING
         self.paused  = False
         self.turn_reset_pending = False
-        self._stuffed_skip = False
+        self._stuffed_skip = 0
         self.identified      = set()
         self.pending_identify = 0
         self.pending_wand     = None
@@ -282,21 +285,61 @@ class GameState:
 
         self.log.add("ARCHITECT MODE: All items granted. All stats maxed.", (100, 200, 255))
 
-    def _consume_food(self, base_amount: int = FOOD_PER_MOVE):
-        """Apply food cost with difficulty scaling and ring hunger drain.
-        Explorer: half rate via float accumulator.
-        Powerful rings (xray, regen) add 1 hunger/move each (Jeweler immune).
+    def _consume_food(self, base_amount: float = FOOD_PER_MOVE):
+        """Apply food cost with difficulty scaling, ring hunger drain,
+        and overstay multiplier.
+
+        Overstay multiplier (applied when turns_on_floor exceeds thresholds):
+          0–299 turns  : ×1.0  (normal — full floor exploration is comfortable)
+          300–499 turns: ×1.5  (warning — player is lingering too long)
+          500+ turns   : ×2.5  (heavy — clear punishment for camping/grinding)
+        Explorer difficulty: base rate halved via float accumulator before
+        the multiplier is applied, so overstay still escalates on Explorer.
         """
         p = self.player
+
+        # ── Overstay multiplier ───────────────────────────────────────────────
+        tof = self.turns_on_floor
+        if tof >= FOOD_OVERSTAY_HEAVY:
+            mult = FOOD_OVERSTAY_MULT_HEAVY
+        elif tof >= FOOD_OVERSTAY_WARN:
+            mult = FOOD_OVERSTAY_MULT_WARN
+        else:
+            mult = 1.0
+
+        effective = base_amount * mult
+
+        # ── Difficulty scaling (Explorer: half rate) ──────────────────────────
         if self.difficulty == DIFF_EXPLORER:
-            self._food_acc += base_amount * 0.5
+            self._food_acc += effective * 0.5
             amount = int(self._food_acc)
             self._food_acc -= amount
         else:
-            amount = base_amount
-        # Ring hunger: each heavy ring adds 1 per base move call
+            # Use accumulator for all non-integer drain values
+            self._food_acc += effective
+            amount = int(self._food_acc)
+            self._food_acc -= amount
+
+        # ── Ring hunger drain (per base move call only) ───────────────────────
         if base_amount == FOOD_PER_MOVE:
             amount += p.ring_hunger_drain
+
+        # ── Warn once when overstay threshold is first crossed ────────────────
+        if (tof == FOOD_OVERSTAY_WARN and
+                base_amount == FOOD_PER_MOVE and
+                self.difficulty != DIFF_ARCHITECT):
+            self.log.add(
+                "You've been on this floor a long time. Your hunger grows.",
+                (200, 160, 60)
+            )
+        elif (tof == FOOD_OVERSTAY_HEAVY and
+                base_amount == FOOD_PER_MOVE and
+                self.difficulty != DIFF_ARCHITECT):
+            self.log.add(
+                "You are lingering far too long. Hunger gnaws at you fiercely!",
+                C_HP_LOW
+            )
+
         p.consume_food(amount)
 
     def _enter_floor(self, floor: int, from_above: bool = True):
@@ -336,25 +379,42 @@ class GameState:
     def _spawn_entities(self, lv: DungeonLevel):
         self.monsters.clear()
         self.items.clear()
+        occupied_positions: set = set()   # guard against duplicate spawn coords
 
         for spawn in lv.monster_spawns:
-            m = Monster(spawn["monster_id"], spawn["x"], spawn["y"],
+            pos = (spawn["x"], spawn["y"])
+            if pos in occupied_positions:
+                # Find nearest free passable tile
+                pos = self._nearest_free_tile(lv, pos, occupied_positions)
+                if pos is None:
+                    continue   # no room — skip this spawn
+            occupied_positions.add(pos)
+            m = Monster(spawn["monster_id"], pos[0], pos[1],
                         spawn["hp"], spawn["max_hp"])
             m.boss_escapes = spawn.get("boss_escapes", 0)
             if spawn["monster_id"] == "gate_keeper":
                 if spawn.get("gk_ac") is not None:
-                    m.ac      = spawn["gk_ac"]
+                    m.ac          = spawn["gk_ac"]
                 if spawn.get("gk_atk") is not None:
-                    m.atk     = spawn["gk_atk"]
+                    m.atk         = spawn["gk_atk"]
+                if spawn.get("gk_num_attacks") is not None:
+                    m.num_attacks = spawn["gk_num_attacks"]
                 if spawn.get("gk_dmg_min") is not None:
-                    m.dmg_min = spawn["gk_dmg_min"]
+                    m.dmg_min     = spawn["gk_dmg_min"]
                 if spawn.get("gk_dmg_max") is not None:
-                    m.dmg_max = spawn["gk_dmg_max"]
+                    m.dmg_max     = spawn["gk_dmg_max"]
             self.monsters.append(m)
 
         for spawn in lv.item_spawns:
             it = Item(spawn["item_id"], spawn["x"], spawn["y"],
                       enchant=spawn.get("enchant", 0))
+            # Restore identification state from when this item was dropped
+            it.id_state_identified     = spawn.get("identified",     False)
+            it.id_state_enchant_known  = spawn.get("enchant_known",  False)
+            it.id_state_fuzzy_enchant  = spawn.get("fuzzy_enchant",  None)
+            it.id_state_fuzzy_id       = spawn.get("fuzzy_id",       None)
+            it.id_state_fuzzy_name     = spawn.get("fuzzy_name",     None)
+            it.id_state_pending_confirm = spawn.get("pending_confirm", False)
             self.items.append(it)
 
     def _floor_monsters(self) -> List[Monster]:
@@ -425,15 +485,16 @@ class GameState:
             self._encumber_skip = False
 
         # ── Stuffed movement penalty ───────────────────────────────────────────
+        # Penalty fires every 4th step (much milder than encumbrance).
+        # Eating is still discouraged but not severely punished.
         if p.stuffed:
-            if self._stuffed_skip:
-                self._stuffed_skip = False
+            self._stuffed_skip = (self._stuffed_skip + 1) % 4
+            if self._stuffed_skip == 0:
                 self.log.add("You waddle, weighed down by your full belly.", (180, 140, 80))
                 self._end_player_turn()
                 return True
-            self._stuffed_skip = True
         else:
-            self._stuffed_skip = False
+            self._stuffed_skip = 0
 
         # ── Ring of Slowness ────────────────────────────────────────────────────
         # Skip every other player action; monsters still act (effectively double turns for them)
@@ -487,6 +548,7 @@ class GameState:
             lv.tile_mods[(nx, ny)] = T_FLOOR
             lv.tile_mods[(bx, by)] = T_BOULDER
             self.log.add("The boulder moves!", (200, 200, 200))
+            get_audio().play("boulder_push")
             p.x, p.y = nx, ny
             self._consume_food()
             self._pick_up_items_v2(nx, ny)
@@ -540,6 +602,7 @@ class GameState:
                     self._end_player_turn()
                     return True
                 self.log.add(f"You descend to level {self.floor + 1}.")
+                get_audio().play("stairs_down")
                 self._save_floor_state()
                 self._enter_floor(self.floor + 1, from_above=True)
             self._end_player_turn()
@@ -547,14 +610,15 @@ class GameState:
 
         if tile == T_STAIR_UP:
             if self.floor <= 1:
-                # Victory — escaped with the Orb (pre-move check already blocked the no-orb case)
                 self.log.add("You escaped the dungeon with the Orb of Carnos!", C_GOLD)
+                get_audio().play("victory")
                 self.death_cause = "Escaped with the Orb"
                 self.phase = PHASE_WIN
                 self._end_player_turn()
                 return True
             else:
                 self.log.add(f"You ascend to level {self.floor - 1}.")
+                get_audio().play("stairs_up")
                 self._save_floor_state()
                 self._enter_floor(self.floor - 1, from_above=False)
             self._end_player_turn()
@@ -628,16 +692,29 @@ class GameState:
                 "monster_id": m.id, "x": m.x, "y": m.y,
                 "hp": m.hp, "max_hp": m.max_hp,
                 "boss_escapes": getattr(m, "boss_escapes", 0),
-                "gk_ac":      getattr(m, "ac",      None) if m.id == "gate_keeper" else None,
-                "gk_atk":     getattr(m, "atk",     None) if m.id == "gate_keeper" else None,
-                "gk_dmg_min": getattr(m, "dmg_min", None) if m.id == "gate_keeper" else None,
-                "gk_dmg_max": getattr(m, "dmg_max", None) if m.id == "gate_keeper" else None,
+                "gk_ac":         getattr(m, "ac",          None) if m.id == "gate_keeper" else None,
+                "gk_atk":        getattr(m, "atk",         None) if m.id == "gate_keeper" else None,
+                "gk_num_attacks":getattr(m, "num_attacks",  None) if m.id == "gate_keeper" else None,
+                "gk_dmg_min":    getattr(m, "dmg_min",     None) if m.id == "gate_keeper" else None,
+                "gk_dmg_max":    getattr(m, "dmg_max",     None) if m.id == "gate_keeper" else None,
             }
             for m in self.monsters if m.alive
         ]
         lv.item_spawns = [
-            {"item_id": it.id, "x": it.x, "y": it.y,
-             "enchant": it.enchant}
+            {
+                "item_id":       it.id,
+                "x":             it.x,
+                "y":             it.y,
+                "enchant":       it.enchant,
+                # Persist identification state so dropped+re-picked items retain
+                # what the player already knew about them.
+                "identified":    getattr(it, "id_state_identified",   False),
+                "enchant_known": getattr(it, "id_state_enchant_known", False),
+                "fuzzy_enchant": getattr(it, "id_state_fuzzy_enchant", None),
+                "fuzzy_id":      getattr(it, "id_state_fuzzy_id",     None),
+                "fuzzy_name":    getattr(it, "id_state_fuzzy_name",   None),
+                "pending_confirm":getattr(it, "id_state_pending_confirm", False),
+            }
             for it in self.items
         ]
 
@@ -662,57 +739,81 @@ class GameState:
             self.log.add(f"You miss the {monster.name}.")
         else:
             self.log.add(f"You hit the {monster.name} for {dmg} damage.")
-            # Announce provocation of previously non-hostile monsters
+            get_audio().play("hit_monster")
             if was_non_hostile and monster.provoked:
                 self.log.add(f"The {monster.name} turns hostile!", (220, 120, 40))
 
         if monster.is_dead():
-            # boss_escape: monster teleports away instead of dying until it
-            # has already escaped twice (third hit is lethal — binary evidence
-            # shows the Wizard disappearing twice before the final kill).
             if "boss_escape" in monster.special and monster.boss_escapes < 2:
                 self._boss_escape(monster)
             else:
                 self._kill_monster(monster)
 
     def _monster_attacks(self, monster: Monster):
-        p    = self.player
-        name = monster.name
+        """Execute one monster's attack sequence for this turn.
 
-        # ── Hit roll ──────────────────────────────────────────────────────────
-        # Formula: roll 1d20; hit if roll ≤ clamp(monster.atk + player.AC - 10, 1, 20)
-        # This uses the TDR `atk` field (previously stored but never applied).
-        # Examples with atk=9 (mid-level monster):
-        #   Unarmored player (AC=10): threshold = 9+10-10 = 9  → 45% hit
-        #   Chain armor     (AC= 8): threshold = 9+ 8-10 = 7  → 35% hit
-        #   Plate armor     (AC= 6): threshold = 9+ 6-10 = 5  → 25% hit
-        #   Best gear       (AC= 2): threshold = 9+ 2-10 = 1  → 5%  hit (min)
-        # High-atk monsters (23+) nearly always hit regardless of armor.
-        threshold = max(1, min(20, monster.atk + p.armor_class - 10))
-        hit_roll  = self.rng.randint(1, 20)
+        Hit system (hybrid — AC affects both avoidance and mitigation):
+          Hit roll:    1d20 ≤ clamp(atk - (10 - player.AC) // 2, 1, 20)
+                       AC contributes half as much to avoidance as in pure systems.
+                       Examples with atk=9:
+                         Unarmored (AC=10): threshold=9  → 45% hit
+                         Chain     (AC= 8): threshold=8  → 40% hit
+                         Banded    (AC= 6): threshold=7  → 35% hit
+                         Plate     (AC= 4): threshold=6  → 30% hit
+          AC effect:   damage reduced by max(0, (10 - player.AC) × 0.4)
+                       Leather absorbs 0.4/hit, Chain 0.8, Banded 1.6, Plate 2.4.
+                       Each upgrade tier is meaningfully felt.
+          Min damage:  1 HP on every successful hit (armour never negates a blow).
 
-        if hit_roll > threshold:
-            self.log.add(f"The {name} misses you.")
-            return
+        Multi-attack: num_attacks fires per turn (1 for most, 2 for elite atk>=20,
+        3 for apex atk>=25). Each attack rolls independently.
+        """
+        p       = self.player
+        name    = monster.name
+        num_atk = getattr(monster, "num_attacks", 1)
 
-        # ── Damage roll — minimum 1 on a successful hit ───────────────────────
-        # AC no longer zeroes out damage; the hit roll handles avoidance.
-        # A monster that lands a blow always deals at least 1 point of damage.
-        dmg    = max(1, self.rng.randint(monster.dmg_min, monster.dmg_max))
-        actual = p.take_damage(dmg)
+        # AC-based flat damage reduction (independent of hit chance)
+        ac_reduction = max(0.0, (10 - p.armor_class) * 0.4)
 
-        if name == "The Floor":
-            self.log.add(f"The Floor hits! ({actual} damage)", C_HP_LOW)
-        else:
-            self.log.add(f"The {name} hits you for {actual} damage.", C_HP_LOW)
+        for attack_n in range(num_atk):
+            if not p.alive:
+                break
 
-        # ── On-hit special abilities ──────────────────────────────────────────
-        self._apply_monster_on_hit(monster)
+            # ── Hit roll ──────────────────────────────────────────────────────
+            threshold = max(1, min(20, monster.atk - (10 - p.armor_class) // 2))
+            hit_roll  = self.rng.randint(1, 20)
 
-        if not p.alive:
-            self.death_cause = f"Slain by {name}"
-            self.phase = PHASE_DEAD
-            self.log.add("You have died.", C_HP_LOW)
+            if hit_roll > threshold:
+                if num_atk == 1:
+                    self.log.add(f"The {name} misses you.")
+                else:
+                    self.log.add(f"The {name} misses (attack {attack_n + 1}).")
+                continue
+
+            # ── Damage roll — minimum 1 on a successful hit ───────────────────
+            raw_dmg = self.rng.randint(monster.dmg_min, monster.dmg_max)
+            dmg     = max(1, int(raw_dmg - ac_reduction))
+            actual  = p.take_damage(dmg)
+
+            if name == "The Floor":
+                self.log.add(f"The Floor hits! ({actual} damage)", C_HP_LOW)
+            elif num_atk > 1:
+                self.log.add(
+                    f"The {name} hits you ({attack_n + 1}/{num_atk})"
+                    f" for {actual} damage.", C_HP_LOW)
+            else:
+                self.log.add(f"The {name} hits you for {actual} damage.", C_HP_LOW)
+            get_audio().play("hit_player")
+
+            # ── On-hit special abilities ──────────────────────────────────────
+            self._apply_monster_on_hit(monster)
+
+            if not p.alive:
+                get_audio().play("player_death")
+                self.death_cause = f"Slain by {name}"
+                self.phase = PHASE_DEAD
+                self.log.add("You have died.", C_HP_LOW)
+                return
 
     def _apply_monster_on_hit(self, monster: Monster):
         """Apply the monster's on-hit special tag effects to the player."""
@@ -837,12 +938,14 @@ class GameState:
         self.stat_xp_earned += monster.xp          # cumulative — feeds HoF glory
         self.monsters = [m for m in self.monsters if m is not monster]
         self.log.add(f"The {monster.name} is slain!  +{monster.xp} XP", C_XP)
+        get_audio().play("kill_monster")
         if levelled:
             self.log.add(
                 f"You reach level {self.player.level}! "
                 f"HP +{max(1,4+self.player.mod(S_CON))}.",
                 (180, 255, 180)
             )
+            get_audio().play("level_up")
         # Gate Keeper kill: mark section cleared, unlock descent
         if "gate_keeper" in monster.special:
             barrier_floor = self._nearest_barrier_below()
@@ -954,7 +1057,11 @@ class GameState:
                     self._necromancer_raise(m)
 
             result = m.think(p, self.level, attracted=attracted,
-                              player_level=plv, cha_score=cha)
+                              player_level=plv, cha_score=cha,
+                              other_positions={
+                                  (o.x, o.y) for o in self._floor_monsters()
+                                  if o is not m
+                              })
             if result and result[0] == "melee":
                 self._monster_attacks(m)
 
@@ -1059,7 +1166,10 @@ class GameState:
         if self.phase not in active:
             return
         self.paused = not self.paused
-        if not self.paused:
+        if self.paused:
+            get_audio().pause_music()
+        else:
+            get_audio().resume_music()
             self.turn_reset_pending = True   # give player a fresh 5 seconds
 
     def auto_pass(self):
@@ -1135,6 +1245,25 @@ class GameState:
         for m in self._floor_monsters():
             if m.x == x and m.y == y:
                 return m
+        return None
+
+    def _nearest_free_tile(self, lv, origin: tuple,
+                            occupied: set) -> Optional[tuple]:
+        """BFS outward from origin to find the nearest passable tile not in
+        occupied. Returns None if the entire floor is full."""
+        from collections import deque
+        ox, oy = origin
+        visited = {origin}
+        queue   = deque([(ox, oy)])
+        while queue:
+            x, y = queue.popleft()
+            if (x, y) not in occupied and lv.is_passable(x, y):
+                return (x, y)
+            for dx, dy in ((0,1),(0,-1),(1,0),(-1,0)):
+                nx, ny = x+dx, y+dy
+                if lv.is_in_bounds(nx, ny) and (nx,ny) not in visited:
+                    visited.add((nx, ny))
+                    queue.append((nx, ny))
         return None
 
     # ── Wandering monster spawner ─────────────────────────────────────────────
@@ -1231,19 +1360,21 @@ class GameState:
             return
 
         sx, sy     = lv.stair_down
+        occupied   = {(m.x, m.y) for m in self.monsters}
+        occupied.add((self.player.x, self.player.y))
         candidates = []
         for ddx in range(-2, 3):
             for ddy in range(-2, 3):
                 tx, ty = sx + ddx, sy + ddy
                 if not lv.is_in_bounds(tx, ty): continue
                 if not lv.is_passable(tx, ty):  continue
-                if (tx, ty) == (self.player.x, self.player.y): continue
+                if (tx, ty) in occupied:         continue
                 candidates.append((tx, ty))
 
         if not candidates:
             candidates = [
                 t for t in lv.floor_tiles()
-                if t != (self.player.x, self.player.y)
+                if t not in occupied
             ]
         if not candidates:
             return
@@ -1257,10 +1388,12 @@ class GameState:
         gk         = Monster("gate_keeper", gx, gy, hp, hp)
         gk.ac      = GK_AC_TABLE.get(next_floor, 0)
         atk, dmg_min, dmg_max = GK_ATK_TABLE.get(next_floor, (12, 8, 16))
-        gk.atk     = atk
-        gk.dmg_min = dmg_min
-        gk.dmg_max = dmg_max
+        gk.atk        = atk
+        gk.num_attacks = 3 if atk >= 22 else (2 if atk >= 15 else 1)
+        gk.dmg_min    = dmg_min
+        gk.dmg_max    = dmg_max
         self.monsters.append(gk)
+        get_audio().play("gate_keeper")
 
     def _item_at(self, x: int, y: int) -> Optional[Item]:
         for it in self.items:
@@ -1442,14 +1575,23 @@ class GameState:
         self.log.add(f"You {verb} the {nm}.", (200, 200, 180))
 
         if cat == IC_FOOD:
-            # Copy to add "effect":"eat" without mutating the inventory dict
+            get_audio().play("eat_food")
             item = dict(item); item["effect"] = "eat"
         elif cat == IC_WAND:
             if item.get("charges", 0) <= 0:
+                get_audio().play("wand_empty")
                 return "The wand is empty.", (180, 60, 60)
-            # Wands require directional aiming — caller must use begin_wand_aim()
+            get_audio().play("zap_wand")
             self.begin_wand_aim(item)
             return "Choose a direction to fire the wand.", (220, 200, 100)
+        elif cat == IC_POTION:
+            effect = item.get("effect", "")
+            if effect in ("confuse", "blind", "poison_drink"):
+                get_audio().play("potion_bad")
+            else:
+                get_audio().play("drink_potion")
+        elif cat == IC_SCROLL:
+            get_audio().play("read_scroll")
 
         msg, col = apply_effect(self, item)
 
@@ -1523,14 +1665,45 @@ class GameState:
         # Already equipped in this slot → unequip
         if p.equipped.get(slot) is item:
             if item.get("cursed"):
+                get_audio().play("curse_blocked")
                 return "It's cursed — you can't remove it!", (200,40,40)
             p.equipped[slot] = None
+            get_audio().play("equip")
             return f"You remove the {item.get('name','item')}.", (200,200,200)
 
         # Unequip anything currently in that slot
         prev = p.equipped.get(slot)
         if prev and prev.get("cursed"):
+            get_audio().play("curse_blocked")
             return "Your current item is cursed — you can't remove it!", (200,40,40)
+
+        # ── Two-handed weapon rules ───────────────────────────────────────────
+        # Equipping a two-handed weapon: force-unequip any offhand item first
+        # (unless that offhand item is cursed — then block the equip entirely).
+        if slot == "weapon" and item.get("hands", 1) == 2:
+            offhand = p.equipped.get("offhand")
+            if offhand is not None:
+                if offhand.get("cursed"):
+                    get_audio().play("curse_blocked")
+                    return (
+                        "You can't wield a two-handed weapon — "
+                        "your offhand item is cursed!", (200, 40, 40)
+                    )
+                p.equipped["offhand"] = None
+                self.log.add(
+                    f"You stow the {offhand.get('name','offhand item')} "
+                    f"to wield the {item.get('name','weapon')} with both hands.",
+                    (200, 200, 180)
+                )
+
+        # Equipping an offhand item: blocked if a two-handed weapon is wielded
+        if slot == "offhand":
+            wpn = p.equipped.get("weapon")
+            if wpn is not None and wpn.get("hands", 1) == 2:
+                return (
+                    f"You need both hands for the {wpn.get('name','weapon')} "
+                    f"— you cannot use an offhand item.", (200, 140, 60)
+                )
 
         p.equipped[slot] = item
 
@@ -1546,6 +1719,7 @@ class GameState:
 
         self._end_player_turn()
         nm = self.item_display_name(item)
+        get_audio().play("equip")
         return f"You equip the {nm}.", (220,200,120)
 
     def drop_item(self, item: dict) -> tuple:
@@ -1559,7 +1733,16 @@ class GameState:
             if p.equipped[slot] is item:
                 p.equipped[slot] = None
         p.remove_from_inventory(item)
-        floor_item = Item(item["item_id"], p.x, p.y)
+        floor_item = Item(item["item_id"], p.x, p.y,
+                          enchant=item.get("enchant", 0))
+        # Copy identification state so it survives the drop→pickup cycle
+        iid = item.get("item_id", item.get("id", ""))
+        floor_item.id_state_identified      = iid in self.identified or item.get("identified", False)
+        floor_item.id_state_enchant_known   = item.get("enchant_known", False)
+        floor_item.id_state_fuzzy_enchant   = item.get("fuzzy_enchant", None)
+        floor_item.id_state_fuzzy_id        = item.get("fuzzy_id", None)
+        floor_item.id_state_fuzzy_name      = item.get("fuzzy_name", None)
+        floor_item.id_state_pending_confirm = item.get("pending_confirm", False)
         self.items.append(floor_item)
         self._end_player_turn()
         nm = self.item_display_name(item)
@@ -1616,6 +1799,38 @@ class GameState:
 
     # ── Pick-up (update to store full item dict) ──────────────────────────────
 
+    def _restore_id_state(self, item_dict: dict, floor_item) -> bool:
+        """If floor_item carries saved identification state (from a previous
+        drop), copy it back into item_dict and skip re-identification.
+        Returns True if state was restored, False if fresh identification needed.
+        """
+        has_identified     = getattr(floor_item, "id_state_identified",     False)
+        has_enchant_known  = getattr(floor_item, "id_state_enchant_known",  False)
+        has_fuzzy_enchant  = getattr(floor_item, "id_state_fuzzy_enchant",  None) is not None
+        has_fuzzy_id       = getattr(floor_item, "id_state_fuzzy_id",       None) is not None
+
+        # If none of the four id-state markers are set, this item has never been
+        # touched by identification — let _apply_expert_identify() run fresh.
+        if not has_identified and not has_enchant_known \
+                and not has_fuzzy_enchant and not has_fuzzy_id:
+            return False
+
+        iid = item_dict.get("item_id", item_dict.get("id", ""))
+
+        if has_identified:
+            item_dict["identified"]    = True
+            item_dict["enchant_known"] = has_enchant_known
+            self.identified.add(iid)
+        if has_enchant_known:
+            item_dict["enchant_known"] = True
+        if has_fuzzy_enchant:
+            item_dict["fuzzy_enchant"] = getattr(floor_item, "id_state_fuzzy_enchant")
+        if has_fuzzy_id:
+            item_dict["fuzzy_id"]        = getattr(floor_item, "id_state_fuzzy_id")
+            item_dict["fuzzy_name"]      = getattr(floor_item, "id_state_fuzzy_name", "???")
+            item_dict["pending_confirm"] = getattr(floor_item, "id_state_pending_confirm", True)
+        return True
+
     def pick_up_forced(self) -> int:
         """Pick up all items at the player's tile, ignoring pickup_mode.
         Returns the number of items picked up. Used by Inventory > Get an Item."""
@@ -1625,11 +1840,13 @@ class GameState:
         for item in here:
             item_dict = item.to_dict()
             if p.add_to_inventory(item_dict):
-                self._apply_expert_identify(item_dict)
+                if not self._restore_id_state(item_dict, item):
+                    self._apply_expert_identify(item_dict)
                 self.items.remove(item)
                 self._last_pickup.append(item_dict)
                 nm = self.item_display_name(item_dict)
                 self.log.add(f"You pick up: {nm}.", (210,175,45))
+                get_audio().play("pickup")
                 if p.overburdened:
                     self.log.add("You are overburdened! You cannot move.", C_HP_LOW)
                 elif p.encumbered:
@@ -1652,11 +1869,13 @@ class GameState:
         for item in here:
             item_dict = item.to_dict()
             if p.add_to_inventory(item_dict):
-                self._apply_expert_identify(item_dict)
+                if not self._restore_id_state(item_dict, item):
+                    self._apply_expert_identify(item_dict)
                 self.items.remove(item)
                 self._last_pickup.append(item_dict)
                 nm = self.item_display_name(item_dict)
                 self.log.add(f"You pick up: {nm}.", (210,175,45))
+                get_audio().play("pickup")
                 if p.overburdened:
                     self.log.add("You are overburdened! You cannot move.", C_HP_LOW)
                 elif p.encumbered:
@@ -1681,7 +1900,15 @@ class GameState:
                             continue   # can't drop cursed equipped items
                         p.equipped[slot] = None
                 from entities.item import Item
-                floor_item = Item(item["item_id"], p.x, p.y)
+                floor_item = Item(item["item_id"], p.x, p.y,
+                                  enchant=item.get("enchant", 0))
+                iid = item.get("item_id", item.get("id", ""))
+                floor_item.id_state_identified      = iid in self.identified or item.get("identified", False)
+                floor_item.id_state_enchant_known   = item.get("enchant_known", False)
+                floor_item.id_state_fuzzy_enchant   = item.get("fuzzy_enchant", None)
+                floor_item.id_state_fuzzy_id        = item.get("fuzzy_id", None)
+                floor_item.id_state_fuzzy_name      = item.get("fuzzy_name", None)
+                floor_item.id_state_pending_confirm = item.get("pending_confirm", False)
                 self.items.append(floor_item)
                 p.remove_from_inventory(item)
                 count += 1

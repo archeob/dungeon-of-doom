@@ -19,8 +19,9 @@ class Monster:
         data         = get_monster(monster_id)
         self.name    = data["name"]
         self.glyph   = data["glyph"]
-        self.ac      = data["ac"]
-        self.atk     = data["atk"]    # used for hit-chance roll in _monster_attacks()
+        self.ac          = data["ac"]
+        self.atk         = data["atk"]    # used for hit-chance roll in _monster_attacks()
+        self.num_attacks = data.get("num_attacks", 1)  # attacks per turn
         self.dmg_min, self.dmg_max = data["damage"]
         self.xp      = data["xp"]
         self.speed   = data["speed"]
@@ -135,7 +136,8 @@ class Monster:
     # ── AI ────────────────────────────────────────────────────────────────────
 
     def think(self, player, level, attracted: bool = False,
-              player_level: int = 1, cha_score: int = 13) -> "Optional[Tuple]":
+              player_level: int = 1, cha_score: int = 13,
+              other_positions: set = None) -> "Optional[Tuple]":
         """
         Decide action based on effective hostility.
 
@@ -163,9 +165,11 @@ class Monster:
         dy = player.y - self.y
         dist = abs(dx) + abs(dy)
 
+        occupied = other_positions or set()
+
         # ── AFRAID — run away ────────────────────────────────────────────────
         if eff == HOSTILITY_AFRAID:
-            return self._flee(player, level)
+            return self._flee(player, level, occupied)
 
         # ── NEUTRAL — ignore player ───────────────────────────────────────────
         if eff == HOSTILITY_NEUTRAL:
@@ -176,7 +180,7 @@ class Monster:
             if dist == 1:
                 return ("melee",)
             if dist <= 5:
-                return self._step_toward(player, level)
+                return self._step_toward(player, level, occupied)
             return None
 
         # ── HOSTILE — chase from up to 15 tiles ──────────────────────────────
@@ -184,27 +188,30 @@ class Monster:
             return ("melee",)
         chase_range = 999 if attracted else 15
         if dist <= chase_range:
-            return self._step_toward(player, level)
+            return self._step_toward(player, level, occupied)
 
         return None
 
-    def _step_toward(self, player, level) -> "Optional[Tuple]":
+    def _step_toward(self, player, level, occupied: set = None) -> "Optional[Tuple]":
+        occupied = occupied or set()
         dx = player.x - self.x
         dy = player.y - self.y
         sx = (1 if dx > 0 else -1) if dx != 0 else 0
         sy = (1 if dy > 0 else -1) if dy != 0 else 0
         for (ox, oy) in ((sx, sy), (sx, 0), (0, sy)):
             nx, ny = self.x + ox, self.y + oy
-            if level.is_passable(nx, ny) and (nx, ny) != (player.x, player.y):
+            if (level.is_passable(nx, ny)
+                    and (nx, ny) != (player.x, player.y)
+                    and (nx, ny) not in occupied):
                 self.x, self.y = nx, ny
                 return ("move", nx, ny)
         return None
 
-    def _flee(self, player, level) -> "Optional[Tuple]":
+    def _flee(self, player, level, occupied: set = None) -> "Optional[Tuple]":
         """Move away from the player, preferring tiles further away."""
+        occupied = occupied or set()
         dx = player.x - self.x
         dy = player.y - self.y
-        # Invert direction
         sx = (-1 if dx > 0 else 1) if dx != 0 else 0
         sy = (-1 if dy > 0 else 1) if dy != 0 else 0
         candidates = [(sx, sy), (sx, 0), (0, sy), (-sx, 0), (0, -sy)]
@@ -212,7 +219,8 @@ class Monster:
             nx, ny = self.x + ox, self.y + oy
             if (0 <= nx < MAP_COLS and 0 <= ny < MAP_ROWS
                     and level.is_passable(nx, ny)
-                    and (nx, ny) != (player.x, player.y)):
+                    and (nx, ny) != (player.x, player.y)
+                    and (nx, ny) not in occupied):
                 self.x, self.y = nx, ny
                 return ("move", nx, ny)
         return None

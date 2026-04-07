@@ -230,6 +230,10 @@ def main():
     screen    = pygame.display.set_mode((SCREEN_W, SCREEN_H))
     clock     = pygame.time.Clock()
 
+    # ── Audio: initialise before GameState so the singleton is ready ──────────
+    from engine.audio import init_audio
+    init_audio()
+
     game       = GameState()
     renderer   = Renderer(screen)
     char_state = fresh_char_state()
@@ -420,6 +424,12 @@ def main():
                             game.pickup_mode = not game.pickup_mode
                             state = "ON" if game.pickup_mode else "OFF"
                             game.log.add(f"Pickup Mode: {state}.", (200,200,200))
+
+                        elif action == "ctrl_sound":
+                            from engine.audio import get_audio
+                            muted = get_audio().toggle_mute()
+                            state = "OFF" if muted else "ON"
+                            game.log.add(f"Sound: {state}.", (200,200,200))
 
                         elif action == "ctrl_pause":
                             game.toggle_pause()
@@ -617,6 +627,8 @@ def main():
 
         renderer.render(game, char_state)
 
+    from engine.audio import get_audio
+    get_audio().quit()
     pygame.quit()
     sys.exit(0)
 

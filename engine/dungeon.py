@@ -55,8 +55,9 @@ def _corridor_width(floor: int) -> int:
 
 def _roll_enchant(rng, max_cap: int) -> int:
     """Weighted enchant roll centred on 0.  Negative = cursed quality.
-    Weights: -2:2  -1:10  0:54  +1:24  +2:8  +3:2  (total 100)"""
-    _WTS = [(-2, 2), (-1, 10), (0, 54), (1, 24), (2, 8), (3, 2)]
+    Weights: -2:2  -1:10  0:52  +1:22  +2:8  +3:5  +4:1  (total 100)
+    The +4 result is rare but possible; clamped to max_cap and item max_enchant."""
+    _WTS = [(-2, 2), (-1, 10), (0, 52), (1, 22), (2, 8), (3, 5), (4, 1)]
     r   = rng.randint(1, 100)
     cum = 0
     for val, w in _WTS:
@@ -352,21 +353,85 @@ class DungeonGenerator:
                 x, y = tiles[tile_cur[0]]
                 tile_cur[0] += 1
                 it  = self.rng.choice(ipool)
-                enc = _roll_enchant(self.rng, enchant_cap) if enchant_cap else 0
+                if enchant_cap:
+                    # Respect the item's own max_enchant — e.g. shield caps at +2
+                    cap = min(enchant_cap, it.get("max_enchant", enchant_cap))
+                    enc = _roll_enchant(self.rng, cap)
+                else:
+                    enc = 0
                 lv.item_spawns.append({
                     "item_id": it["id"], "x": x, "y": y, "enchant": enc,
                 })
 
-        _spawn(IC_FOOD,   self.rng.randint(1, 2))
+        # ── Food: scaled by floor depth ───────────────────────────────────────
+        if floor <= 5:
+            food_count = self.rng.randint(4, 6)
+        elif floor <= 15:
+            food_count = self.rng.randint(3, 5)
+        elif floor <= 30:
+            food_count = self.rng.randint(2, 4)
+        else:
+            food_count = self.rng.randint(2, 3)
+        _spawn(IC_FOOD, food_count)
+
         _spawn(IC_POTION, self.rng.randint(1 + int(floor >= 15),
                                            3 + int(floor >= 20)))
         if floor >= 2:
             _spawn(IC_SCROLL, self.rng.randint(int(floor >= 10),
                                                2 + int(floor >= 15)))
+
+        # ── Weapons: corrected unlock formula ─────────────────────────────────
+        # Old formula (floor//5+2) kept Dagger+Whip only until floor 5.
+        # New: Long Sword available from floor 2, Mace from floor 5,
+        # Two-Handed from floor 10, Death Blade from floor 20.
+        # floor//3+1 maps: floors 1→2  Dagger/Whip; floor 3→2  same;
+        # floor 4→2  +LongSword; floor 7→3  +Mace; floor 12→5  +2H; etc.
+        # Adjusted to: max_dmg = floor//4 + 2  (friendlier early unlock)
+        #   floor 1-3: max_dmg=2  Dagger, Whip
+        #   floor 4-7: max_dmg=3  + Long Sword
+        #   floor 8-11: max_dmg=4  + Mace
+        #   floor 12-15: max_dmg=5  + Two-Handed Sword
+        #   floor 16+: max_dmg=6  + Death Blade
         _spawn(IC_WEAPON, self.rng.randint(0, 1 + int(floor >= 20)),
-               enchant_cap=3)
-        _spawn(IC_ARMOR,  self.rng.randint(1, 2 + int(floor >= 10)),
-               enchant_cap=3)
+               enchant_cap=4)
+
+        # ── Armor: guaranteed one body piece + accessories separately ─────────
+        # Old system picked randomly from all armor slots, so early floors
+        # were more likely to yield Helmets/Gloves than body armor.
+        # New: always spawn 1 body armor first, then 1-2 accessories.
+        from constants import IC_ARMOR
+        from data.items import ITEMS
+
+        body_pool = [i for i in ITEMS
+                     if i["cat"] == IC_ARMOR and i["slot"] == "armor"
+                     and i.get("base_ac", 0) <= max(1, floor // 8 + 1)]
+        acc_pool  = [i for i in ITEMS
+                     if i["cat"] == IC_ARMOR and i["slot"] != "armor"
+                     and i.get("base_ac", 0) <= 2]   # accessories cap at +2
+
+        # Spawn 1 guaranteed body armor piece
+        if body_pool and tile_cur[0] < len(tiles):
+            x, y = tiles[tile_cur[0]]; tile_cur[0] += 1
+            it   = self.rng.choice(body_pool)
+            cap  = min(4, it.get("max_enchant", 4))
+            lv.item_spawns.append({
+                "item_id": it["id"], "x": x, "y": y,
+                "enchant": _roll_enchant(self.rng, cap)
+            })
+
+        # Then 1-2 accessories (helmet, gloves, shield, cloak)
+        if acc_pool:
+            acc_count = self.rng.randint(1, 2 + int(floor >= 10))
+            for _ in range(acc_count):
+                if tile_cur[0] >= len(tiles):
+                    break
+                x, y = tiles[tile_cur[0]]; tile_cur[0] += 1
+                it   = self.rng.choice(acc_pool)
+                cap  = min(2, it.get("max_enchant", 2))
+                lv.item_spawns.append({
+                    "item_id": it["id"], "x": x, "y": y,
+                    "enchant": _roll_enchant(self.rng, cap)
+                })
 
         # Throwing items
         _throw_pool = throwing_items_for_floor(floor)

@@ -53,9 +53,9 @@
 #   Legacy alias MONSTER_POWER kept at 1.0 so any external reference compiles.
 #
 MONSTER_POWER:     float = 1.0   # legacy alias — do not use for new code
-MONSTER_HP_POWER:  float = 2.5   # monsters are much harder to kill
-MONSTER_DMG_POWER: float = 1.3   # moderately more damage per hit
-MONSTER_XP_POWER:  float = 0.4   # slow XP gain — ~1 XP level per dungeon level
+MONSTER_HP_POWER:  float = 2.0   # tanky but less grindy than 2.5
+MONSTER_DMG_POWER: float = 1.5   # calibrated for hybrid AC system
+MONSTER_XP_POWER:  float = 0.3   # harder kills = slower levelling
 
 from constants import HOSTILITY_HOSTILE, HOSTILITY_CAUTIOUS, HOSTILITY_NEUTRAL
 
@@ -90,13 +90,21 @@ def _hp_dice(base_hp: int):
 
 def _dmg_dice(base_dmg: int):
     """
-    Convert a flat damage value into a (count, sides) dice pair, scaled by
-    MONSTER_DMG_POWER.  Uses d6s as the base die.
+    Convert a flat base damage value into a (dmg_min, dmg_max) range for
+    randint(), scaled by MONSTER_DMG_POWER.
+
+    Returns a flat [min, max] pair where:
+      dmg_min = ~40% of scaled value (reasonable floor)
+      dmg_max = scaled value (ceiling)
+
+    Previously this returned (count, sides) dice notation which caused a crash
+    when count > sides (e.g. Caveman with high base_dmg at 1.5× power produced
+    count=11, sides=6 → randint(11, 6) → ValueError).
     """
-    scaled = _scale_dmg(base_dmg)
-    count = max(1, round(scaled / 3.5))
-    sides = max(2, round((scaled / count) * 2 - 1))
-    return (count, sides)
+    scaled  = _scale_dmg(base_dmg)
+    dmg_min = max(1, round(scaled * 0.4))
+    dmg_max = max(dmg_min + 1, scaled)
+    return (dmg_min, dmg_max)
 
 
 # ── Special-attack tag constants (documented here for engine reference) ──────
@@ -146,6 +154,14 @@ def _m(id, name, glyph, icon_id,
         "hp_fixed":       round(hp_fixed * MONSTER_HP_POWER) if hp_fixed is not None else None,
         "ac":             ac,
         "atk":            atk,
+        # num_attacks: derived from atk value — only truly elite monsters attack
+        # multiple times per turn. Thresholds chosen so most floor 1–12 monsters
+        # attack once; high-tier threats (Fire Lizard, Dark Wizard etc.) twice or
+        # three times.
+        #   atk  1–19 → 1 attack   (nearly all normal monsters)
+        #   atk 20–24 → 2 attacks  (Caveman, Fire Lizard, Banshee level threats)
+        #   atk 25+   → 3 attacks  (Air Devil, Evil Necromancer, Dark Wizard)
+        "num_attacks":    3 if atk >= 25 else (2 if atk >= 20 else 1),
         "damage":         _dmg_dice(base_dmg),
         "xp":             _scale_xp(base_xp),
         "speed":          speed,
@@ -311,11 +327,11 @@ MONSTERS = [
        color_hint=(220, 80, 120),
        base_hostility=HOSTILITY_HOSTILE),
 
-    _m("caveman",          "Caveman",          "C", 415,   # ✓ observed
+    _m("caveman",          "Caveman",          "C", 415,   # ✓ observed — TDR icon 415 (table row 15)
        min_floor=2,   max_floor=5,
-       base_hp=55,  ac= 4,  atk= 9,  base_dmg=16,
-       base_xp=1500,  speed=1,
-       special=["immune_fire"],
+       base_hp=55,  ac= 4,  atk= 9,  base_dmg=7,   # ref: 12d8 HP, 5d5 dmg (avg 15)
+       base_xp=250,   speed=1,                       # was 1500 (450 scaled) — rebalanced to 75 scaled
+       special=["immune_fire"],                       # comparable to Zambit/Giant Spider tier
        spawn_freq=40,  loot_chance=0.30,
        color_hint=(160, 120, 80),
        base_hostility=HOSTILITY_HOSTILE),
@@ -580,7 +596,7 @@ MONSTERS = [
        min_floor=5,   max_floor=35,
        base_hp=1,   ac= 1,  atk= 1,  base_dmg=1,
        base_xp=15000, speed=1,
-       special=["gate_keeper"],
+       special=["gate_keeper", "head_smash"],
        spawn_freq=0,   loot_chance=0.0,
        color_hint=(200, 180, 80),
        base_hostility=HOSTILITY_HOSTILE),

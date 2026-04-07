@@ -370,11 +370,16 @@ def items_for_floor(floor: int, rng) -> list:
 
 def items_by_category_for_floor(cat: str, floor: int) -> list:
     """Return eligible items of a single category for the given floor depth.
-    Used by the new per-category spawn system in dungeon._populate()."""
+    Used by the per-category spawn system in dungeon._populate()."""
     from constants import IC_WEAPON, IC_ARMOR
     if cat == IC_WEAPON:
-        max_dmg = max(1, floor // 5 + 2)
-        # Exclude throwing-slot items from the regular weapon drop pool
+        # Corrected unlock: floor//4+2 gives gradual progression
+        #   floors 1-3  → max_dmg=2  (Dagger, Leather Whip)
+        #   floors 4-7  → max_dmg=3  (+ Long Sword)
+        #   floors 8-11 → max_dmg=4  (+ Mace)
+        #   floors 12-15→ max_dmg=5  (+ Two-Handed Sword)
+        #   floors 16+  → max_dmg=6  (+ Death Blade)
+        max_dmg = max(2, floor // 4 + 2)
         return [i for i in ITEMS
                 if i["cat"] == IC_WEAPON
                 and i.get("slot") != "throw"

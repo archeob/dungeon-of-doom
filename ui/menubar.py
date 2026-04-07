@@ -41,7 +41,7 @@ MENU_DATA = {
     "Control": [
         {"label": "Pickup Mode",    "action": "ctrl_pickup_mode",  "check_key": "pickup_mode"},
         _SEP,
-        {"label": "Sound",          "check_key": "sound_on"},
+        {"label": "Sound",          "action": "ctrl_sound",        "check_key": "sound_on"},
         {"label": "Pause",          "action": "ctrl_pause"},
         _SEP,
         {"label": "Adjust Volume…"},

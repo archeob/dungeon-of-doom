@@ -1,5 +1,70 @@
 [
   {
+    "game_id": 3355164,
+    "name": "Arax",
+    "class_key": "knight",
+    "class_name": "Knight",
+    "char_level": 7,
+    "dungeon_floor": 6,
+    "glory": 29665,
+    "outcome": "Starved to death",
+    "turns": 3465,
+    "date": "2026-04-04",
+    "difficulty": "adventurer"
+  },
+  {
+    "game_id": 14849081,
+    "name": "Arax",
+    "class_key": "knight",
+    "class_name": "Knight",
+    "char_level": 3,
+    "dungeon_floor": 3,
+    "glory": 2462,
+    "outcome": "Slain by Wandering Eye",
+    "turns": 724,
+    "date": "2026-04-07",
+    "difficulty": "adventurer"
+  },
+  {
+    "game_id": 475807,
+    "name": "Arax",
+    "class_key": "knight",
+    "class_name": "Knight",
+    "char_level": 2,
+    "dungeon_floor": 3,
+    "glory": 1663,
+    "outcome": "Slain by Wandering Eye",
+    "turns": 680,
+    "date": "2026-04-06",
+    "difficulty": "adventurer"
+  },
+  {
+    "game_id": 5582543,
+    "name": "Arax",
+    "class_key": "knight",
+    "class_name": "Knight",
+    "char_level": 2,
+    "dungeon_floor": 2,
+    "glory": 1153,
+    "outcome": "Slain by Caveman",
+    "turns": 765,
+    "date": "2026-04-06",
+    "difficulty": "adventurer"
+  },
+  {
+    "game_id": 9711173,
+    "name": "Arax",
+    "class_key": "wizard",
+    "class_name": "Wizard",
+    "char_level": 1,
+    "dungeon_floor": 2,
+    "glory": 780,
+    "outcome": "Slain by Caveman",
+    "turns": 222,
+    "date": "2026-04-02",
+    "difficulty": "adventurer"
+  },
+  {
     "game_id": 4545765,
     "name": "Arax",
     "class_key": "sage",
@@ -10,6 +75,19 @@
     "outcome": "Slain by Caveman",
     "turns": 438,
     "date": "2026-03-24",
+    "difficulty": "adventurer"
+  },
+  {
+    "game_id": 5281006,
+    "name": "Arax",
+    "class_key": "knight",
+    "class_name": "Knight",
+    "char_level": 1,
+    "dungeon_floor": 2,
+    "glory": 676,
+    "outcome": "Slain by Caveman",
+    "turns": 264,
+    "date": "2026-04-06",
     "difficulty": "adventurer"
   }
 ]

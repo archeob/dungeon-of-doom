@@ -245,14 +245,35 @@ class InventoryScreen:
     # ── List helpers ──────────────────────────────────────────────────────────
 
     def _build_list(self, game) -> list:
-        p = game.player; seen = set(); ordered = []
+        """Build the ordered inventory display list.
+
+        Items are grouped by category (per _CAT_ORDER), then sorted within each
+        group so:
+          1. Equipped items appear first (they carry a [WPN]/[ARM]/etc. badge).
+          2. Remaining items sorted by display name — identical aliases cluster.
+        """
+        p = game.player
+        equipped_ids = {id(eq) for eq in p.equipped.values() if eq is not None}
+
+        seen    = set()
+        ordered = []
         for cat, _ in _CAT_ORDER:
-            for item in p.inventory:
-                if item.get("cat") == cat and id(item) not in seen:
-                    seen.add(id(item)); ordered.append(item)
+            group = [item for item in p.inventory
+                     if item.get("cat") == cat and id(item) not in seen]
+            # Sort: equipped first, then by display name for clustering
+            group.sort(key=lambda it: (
+                0 if id(it) in equipped_ids else 1,
+                game.item_display_name(it)
+            ))
+            for item in group:
+                seen.add(id(item))
+                ordered.append(item)
+
+        # Fallback: equipped items not already in inventory list
         for slot, eq in p.equipped.items():
             if eq is not None and id(eq) not in seen:
-                seen.add(id(eq)); ordered.append(eq)
+                seen.add(id(eq))
+                ordered.append(eq)
         return ordered
 
     def navigate(self, delta: int, game):

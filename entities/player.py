@@ -176,8 +176,18 @@ class Player:
 
     @property
     def damage_bonus(self) -> int:
-        """Flat damage bonus added to every weapon roll."""
-        return self.mod(S_STR)
+        """Flat damage added to every weapon roll.
+        Requires STR ≥ 13 to contribute — STR 12 and below gives +0.
+        This prevents starting martial classes from trivialising early combat
+        via their stat bonus alone; players must invest in STR gear to push dmg.
+        Negative STR still penalises damage (min bonus = STR modifier clamped ≥ -3).
+        """
+        raw = self.mod(S_STR)
+        if raw > 0:
+            # Positive: only kicks in from STR 13 (mod=1 at old formula, now +0)
+            # New: treat STR modifier as (STR - 12) // 2  for positive range only
+            return max(0, (self.stats[S_STR] - 12) // 2)
+        return max(-3, raw)   # negative: cap penalty at -3
 
     @property
     def weapon_damage_range(self) -> tuple:

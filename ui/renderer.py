@@ -51,8 +51,10 @@ class Renderer:
     def advance(self): self.tick += 1
 
     def render(self, game: GameState, char_state: dict = None):
+        from engine.audio import get_audio
         self.screen.fill(C_BLACK)
         if game.phase == PHASE_TITLE:
+            get_audio().play_music("title_theme")
             self.title_scr.draw(self.tick,
                                 has_active_game=getattr(game, '_had_game', False))
         elif game.phase == PHASE_CHAR_CREATE:
@@ -61,17 +63,24 @@ class Renderer:
                             PHASE_INVENTORY, PHASE_WISH, PHASE_QUICK_USE,
                             PHASE_WAND_AIM, PHASE_THROW_AIM):
             if game.phase in (PHASE_DEAD, PHASE_WIN):
-                # White-theme full-screen result — no game background needed
-                if game.phase == PHASE_DEAD: self.overlay.draw_death(game)
-                else:                        self.overlay.draw_win(game)
+                if game.phase == PHASE_DEAD:
+                    get_audio().play_music("death_theme", loops=0)
+                    self.overlay.draw_death(game)
+                else:
+                    get_audio().play_music("victory_theme", loops=0)
+                    self.overlay.draw_win(game)
             else:
+                # Switch to boss music on floor 40, ambient everywhere else
+                if getattr(game, 'floor', 1) == 40:
+                    get_audio().play_music("boss_floor")
+                else:
+                    get_audio().play_music("dungeon_ambient")
                 self._draw_game(game)
                 if   game.phase == PHASE_INVENTORY: self.inv_scr.draw(game)
                 elif game.phase == PHASE_WISH:      self.wish_pop.draw(game)
                 elif game.phase == PHASE_QUICK_USE: self.quick_use.draw(game)
                 elif game.phase == PHASE_WAND_AIM:   self._draw_wand_aim(game)
                 elif game.phase == PHASE_THROW_AIM:  self._draw_throw_aim(game)
-                # ── Paused overlay ────────────────────────────────────────────────
                 if game.paused and game.phase == PHASE_PLAYING:
                     self._draw_paused_overlay()
         if game.phase in (PHASE_PLAYING, PHASE_DEAD, PHASE_WIN,
@@ -79,7 +88,7 @@ class Renderer:
                           PHASE_WAND_AIM, PHASE_THROW_AIM):
             cs = {
                 "pickup_mode": getattr(game, "pickup_mode", True),
-                "sound_on":    False,
+                "sound_on":    not get_audio().muted,
             }
             self.menubar.draw_dropdown(self.screen, check_states=cs)
         pygame.display.flip()
@@ -180,6 +189,9 @@ class Renderer:
 
                 tile = lv.get(wx, wy)
                 surf.blit(self._floor_spr(tile, wx, wy), (sx, sy))
+                # Boulder: floor drawn first (above), boulder overlaid on top
+                if tile == T_BOULDER:
+                    self._boulder_overlay(surf, sx, sy)
 
                 item = game._item_at(wx, wy)
                 if item:
@@ -214,10 +226,13 @@ class Renderer:
         if   tile == T_WALL:       return sprites.get("wall_lit")
         elif tile == T_STAIR_DOWN: return sprites.get("stair_down")
         elif tile == T_STAIR_UP:   return sprites.get("stair_up")
-        elif tile == T_BOULDER:    return sprites.get("boulder")
         else:
             light = (wx + wy) % 2 == 0
             return sprites.get("floor_light_lit" if light else "floor_grey_lit")
+
+    def _boulder_overlay(self, surf, sx: int, sy: int):
+        """Blit the boulder sprite on top of the already-rendered floor tile."""
+        surf.blit(sprites.get("boulder"), (sx, sy))
 
     def _hp_bar(self, surf, sx, sy, pct):
         bw  = TILE - 8

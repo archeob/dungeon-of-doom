@@ -1,4 +1,4 @@
-VERSION = "0.410.20260325"
+VERSION = "0.500.20260405"
 
 # constants.py — 1392×896 window (864 dungeon + 528 stats panel)
 
@@ -118,8 +118,17 @@ HP_PER_CON_POINT = 1
 FOOD_MAX         = 1000
 FOOD_STUFFED     = 950    # food >= this → player is stuffed (movement penalty)
 FOOD_START       = 800
-FOOD_PER_MOVE    = 1
+FOOD_PER_MOVE    = 0.8   # was 1 — slight breathing room for explorers
 FOOD_STARVE      = 0
+
+# ── Overstay hunger multiplier ────────────────────────────────────────────────
+# After spending too many turns on one floor, drain rate escalates.
+# Rewards exploration and moving on; punishes camping/grinding.
+# turns_on_floor is reset to 0 every time the player enters a floor.
+FOOD_OVERSTAY_WARN  = 300   # turns before drain starts escalating (×1.5)
+FOOD_OVERSTAY_HEAVY = 500   # turns before heavy penalty kicks in (×2.5)
+FOOD_OVERSTAY_MULT_WARN  = 1.5
+FOOD_OVERSTAY_MULT_HEAVY = 2.5
 
 # ── Real-time turn timer ──────────────────────────────────────────────────────
 TURN_MS          = 5000   # milliseconds per turn (auto-Pass fires after this)
@@ -205,13 +214,13 @@ CRIT_THRESHOLD = 20
 GK_BARRIER_FLOORS = [5, 10, 15, 20, 25, 30, 35]
 
 GK_HP_TABLE = {
-     5: (  8,  20),
-    10: ( 17,  30),
-    15: ( 31,  41),
-    20: ( 42,  49),
-    25: ( 50,  57),   # confirmed via BSR args in CODE_4 @ 0x06e0
-    30: ( 58,  64),
-    35: ( 65,  79),
+     5: ( 60,  80),   # was (8,20)  — must feel like a real obstacle at floor 4
+    10: (110, 140),   # was (17,30)
+    15: (160, 200),   # was (31,41)
+    20: (220, 260),   # was (42,49)
+    25: (270, 310),   # was (50,57)
+    30: (320, 370),   # was (58,64)
+    35: (380, 430),   # was (65,79)
 }
 
 GK_AC_TABLE = {
@@ -225,13 +234,13 @@ GK_AC_TABLE = {
 }
 
 GK_ATK_TABLE = {
-     5:  ( 6,  4, 10),   # (atk, dmg_min, dmg_max)
-    10:  ( 9,  7, 14),
-    15:  (12, 10, 18),
-    20:  (15, 13, 22),
-    25:  (18, 16, 26),
-    30:  (21, 18, 28),
-    35:  (24, 20, 32),
+     5:  (12,  8, 16),   # 1 attack (atk<20) — tough but beatable with chain+potions
+    10:  (15, 12, 22),   # 1 attack — requires banded+potions
+    15:  (18, 16, 28),   # 1 attack — serious threat; plate recommended
+    20:  (20, 18, 32),   # 2 attacks (atk>=20) — major escalation; full kit needed
+    25:  (22, 20, 36),   # 2 attacks — very dangerous
+    30:  (24, 22, 40),   # 2 attacks — near-elite threat
+    35:  (25, 24, 44),   # 2 attacks — hardest GK
 }
 
 # ── Messages ──────────────────────────────────────────────────────────────────

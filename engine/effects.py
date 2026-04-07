@@ -130,6 +130,8 @@ def apply_effect(game, item: dict) -> tuple:
     elif eff == "teleport":
         _teleport_player(game); col = C_LTEXT_ACCENT
     elif eff == "remove_curse":
+        from engine.audio import get_audio
+        get_audio().play("remove_curse")
         _remove_curse(p); col = C_HP_FULL
     elif eff == "amnesia":
         game._reshuffle_id_map(); col = C_HP_LOW
@@ -450,11 +452,11 @@ def _teleport_player(game):
 
 
 def _remove_curse(p):
+    """Remove curses from all currently equipped items only.
+    Matches TDR v1.2.3 original behaviour — inventory items are unaffected.
+    The player must equip an item before the scroll can free it."""
     for slot, item in p.equipped.items():
         if item and item.get("cursed"):
-            item["cursed"] = False
-    for item in p.inventory:
-        if item.get("cursed"):
             item["cursed"] = False
 
 

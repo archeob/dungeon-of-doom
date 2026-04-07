@@ -17,7 +17,7 @@
 from typing import Set
 from constants import MAP_COLS, MAP_ROWS, T_WALL, T_BOULDER
 
-_OPAQUE = {T_WALL, T_BOULDER}   # tile types that block line of sight
+_OPAQUE = {T_WALL}   # only solid walls block line of sight; boulders do not
 
 _EPSILON = 1e-9
 
