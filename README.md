@@ -1083,3 +1083,407 @@ all tile types now use the unified function.
 
 #### `constants.py`
 - `VERSION` bumped to `0.410.20260325`.
+
+## v0.411.20260404
+### Hunger rebalance — exploration rewarded, camping punished
+
+#### Design rationale
+Playtesting showed starvation was killing thorough explorers on floor 6 despite
+eating everything found. Root cause: `FOOD_PER_MOVE=1` combined with 1–2 food
+items per floor meant the food budget was net negative on every floor even with
+perfect play. The hunger system now distinguishes between the two behaviours it
+should punish (speedrunning past food, camping) and the one it should not
+(thorough exploration).
+
+#### `constants.py`
+- `FOOD_PER_MOVE` lowered from `1` to `0.8` — uses the existing `_food_acc`
+  float accumulator, giving explorers a 20% breathing room without affecting
+  feel dramatically.
+- Four new overstay constants:
+  - `FOOD_OVERSTAY_WARN  = 300`  — turns on one floor before ×1.5 drain
+  - `FOOD_OVERSTAY_HEAVY = 500`  — turns on one floor before ×2.5 drain
+  - `FOOD_OVERSTAY_MULT_WARN  = 1.5`
+  - `FOOD_OVERSTAY_MULT_HEAVY = 2.5`
+
+#### `engine/dungeon.py` — floor-scaled food spawn
+Food spawn counts now scale with floor depth, replacing the flat `randint(1,2)`:
+
+| Floors  | Spawn count  |
+|---------|-------------|
+| 1–5     | 4–6 items   |
+| 6–15    | 3–5 items   |
+| 16–30   | 2–4 items   |
+| 31–40   | 2–3 items   |
+
+A thorough explorer on floors 1–15 will find 3–5 items averaging ~400 food
+value each — more than enough to cover 300 turns of exploration at 0.8/move.
+The gradual tightening at depth creates authentic late-game tension.
+
+#### `engine/game.py` — `_consume_food()` overstay multiplier
+`_consume_food()` now reads `self.turns_on_floor` (already tracked, resets on
+every floor entry) and applies a multiplier to the effective drain rate:
+
+- `turns_on_floor < 300`: ×1.0 (normal)
+- `300 ≤ turns_on_floor < 500`: ×1.5 — log warning on first tick
+- `turns_on_floor ≥ 500`: ×2.5 — log urgent warning on first tick
+
+The multiplier applies before Explorer half-rate so overstay still escalates
+on all difficulty levels. The accumulator-based approach (`_food_acc`) handles
+fractional drain correctly for all multiplier values. Log warnings fire once
+when the threshold is first crossed.
+
+#### Simulation results (validated pre-implementation)
+| Scenario | Floor reached | Food at floor 15 |
+|----------|--------------|-----------------|
+| Thorough (300t/floor, 80% find rate) | 20+ | Full |
+| Unlucky (300t/floor, 60% find rate) | 20+ | OK |
+| Speedrunner (50t/floor, 10% find rate) | 20+ | Gradual drain |
+| Extreme camper (1000t every floor) | Starved floor 1 turn 659 | — |
+
+Speedrunners who skip food are punished by _missing food supply_, not by the
+drain rate — which is the intended design. The overstay multiplier exists
+exclusively to punish camping and grinding in place.
+
+## v0.412.20260404
+### Combat difficulty overhaul — armor matters, GK is a real boss
+
+#### Motivation
+Playtesting through floor 6 showed no combat challenge — monsters died instantly,
+armor upgrades felt optional, and the Gate Keeper was killed in a few hits. Root
+causes: player damage output too high relative to monster HP; hit system removed
+all value from armor as avoidance; monsters never attacked more than once per turn.
+
+#### `data/monsters.py` — power dial recalibration
+| Constant | Old | New | Reason |
+|----------|-----|-----|--------|
+| `MONSTER_HP_POWER` | 2.5 | 2.0 | Less tedious to kill; fights still take work |
+| `MONSTER_DMG_POWER` | 1.3 | 1.5 | Calibrated to hybrid AC system |
+| `MONSTER_XP_POWER` | 0.4 | 0.3 | Harder fights = more turns = lower XP/time |
+
+- `num_attacks` field added to every monster dict (derived from `atk`):
+  - `atk  1–19` → 1 attack/turn (nearly all normal monsters)
+  - `atk 20–24` → 2 attacks/turn (Caveman, Fire Lizard tier)
+  - `atk 25+`   → 3 attacks/turn (Air Devil, Evil Necromancer, Dark Wizard)
+- Gate Keeper: `special` now includes `"head_smash"` (stun on hit).
+
+#### `constants.py` — Gate Keeper tables rebalanced
+- `GK_HP_TABLE` dramatically increased: floor-5 GK now has 60–80 HP (was 8–20).
+  Deep GKs scale to 380–430 HP at floor 35. These are final HP values, not
+  scaled by `MONSTER_HP_POWER`.
+- `GK_ATK_TABLE`: floor-5 GK atk raised to 12 (was 6); scales to 25 at floor 35.
+  Floor-20+ GKs have atk≥20, triggering 2 attacks/turn — a major escalation.
+
+#### `engine/game.py` — `_monster_attacks()` — hybrid AC combat system
+Old system: pure avoidance (`threshold = atk + AC - 10`). AC reduced
+hit chance so strongly that plate armor gave near-immunity to early monsters.
+
+New system:
+- **Hit roll**: `1d20 ≤ clamp(atk - (10 - AC) // 2, 1, 20)`
+  AC contributes to avoidance at half weight. Plate (AC=4) reduces a
+  floor-6 monster's hit chance from 45% to 30%. Armor helps but doesn't
+  make the player untouchable.
+- **AC damage reduction**: `max(0, (10 - AC) × 0.4)` subtracted from every
+  hit. Leather absorbs 0.4/hit, Chain 0.8, Banded 1.6, Plate 2.4.
+  Every upgrade tier is meaningfully felt.
+- **Min damage**: 1 HP on any successful hit (preserved from v0.408).
+- **Multi-attack loop**: each of `monster.num_attacks` attacks rolls
+  independently; loop stops early if player dies mid-sequence.
+  Multi-attack message format: "The X hits you (2/2) for N damage."
+
+#### `entities/monster.py`
+- `self.num_attacks` stored from `data["num_attacks"]` (defaults to 1 for
+  monsters loaded from old saves via `data.get()`).
+- GK spawn (`_maybe_spawn_gate_keeper`) and save/restore
+  (`_save_floor_state` / `_spawn_entities`) now persist `gk_num_attacks`.
+
+#### `entities/player.py` — `damage_bonus` tightened
+- Positive damage bonus now requires STR ≥ 13 (formula: `(STR-12)//2`).
+  STR 12 and below gives +0 bonus (was +1 at STR 12 in D&D formula).
+  STR 17 Knight: +2 (was +3). Negative STR still penalises, capped at -3.
+  Effect: early combat isn't trivialised by stat bonuses; players need to
+  actually upgrade weapons to increase damage output.
+
+#### Validated combat outcomes (simulation, seed 42)
+| Scenario | Result |
+|----------|--------|
+| Zambit (floor 6): Leather vs Chain vs Banded (no pots) | 60% / 75% / 95% win — clear upgrade value |
+| GK floor 5: Chain + 3 potions | Barely wins (2 HP) |
+| GK floor 5: Banded + 2 potions | Comfortable win |
+| GK floor 5: Leather + 3 potions | Dies — chain minimum required |
+| GK floor 10: Plate + 4 Extra Healing potions | Winnable — resource intensive |
+
+## v0.413.20260404
+### Bug fixes: monster collision, item identification persistence, inventory grouping
+
+#### Bug 1 — Two monsters occupying the same tile (`engine/game.py`, `entities/monster.py`)
+Three separate code paths could place monsters on the same tile:
+
+- **`_spawn_entities()`**: no position deduplication when loading monster spawns
+  from saved floor state. Now tracks `occupied_positions` and BFS-finds the
+  nearest free passable tile for any duplicate via new `_nearest_free_tile()`.
+- **`_maybe_spawn_gate_keeper()`**: candidates list did not exclude tiles already
+  occupied by other monsters. Now builds a full `occupied` set from live monsters
+  and the player before selecting a spawn tile.
+- **Monster movement (`monster.think()`, `_step_toward()`, `_flee()`)**: no
+  check for other monsters when choosing a move target. All three now accept an
+  `other_positions: set` parameter (passed from `_run_monster_turns` as the set
+  of all other live monster positions) and skip any tile in that set. This
+  prevents monsters from stacking during pursuit.
+
+#### Bug 2 — Identified items losing identification on drop/pickup (`engine/game.py`)
+When an item was dropped and re-picked, `to_dict()` always returned
+`identified=False` and `enchant_known=False` because the floor `Item` object is
+created fresh with no memory of what the player knew.
+
+Fix: identification state is now fully round-tripped through the floor item layer:
+
+- **`drop_item()`** and **`drop_by_categories()`**: copy six id-state fields onto
+  the floor `Item` as `id_state_*` attributes (`identified`, `enchant_known`,
+  `fuzzy_enchant`, `fuzzy_id`, `fuzzy_name`, `pending_confirm`).
+- **`_save_floor_state()`**: `item_spawns` dicts now include all six id-state
+  fields so identification survives floor transitions.
+- **`_spawn_entities()`**: restores `id_state_*` attributes from spawn dict onto
+  the reconstituted floor `Item`.
+- **`_restore_id_state()`**: new helper called in both pickup functions before
+  `_apply_expert_identify()`. If the floor item carries saved id state, it copies
+  it back into the inventory dict and returns `True` (skipping re-identification).
+  If the item has never been identified, returns `False` and normal expert
+  identification proceeds.
+
+#### Bug 3 — Inventory not grouping same-kind items (`ui/inventory.py`)
+Items within a category were displayed in the order they were picked up (inventory
+insertion order), so multiple "Yellow Potions" could be scattered across the list.
+
+`_build_list()` now sorts within each category group by `game.item_display_name()`
+so identical aliases cluster together. Equipped items are sorted to the **top** of
+their category group so the `[WPN]`/`[ARM]`/etc. badge is always immediately
+visible for the most relevant item in the category.
+
+The equipped badge (`[WPN]`, `[ARM]`, `[CLK]`, `[HLM]`, `[GLV]`, `[RL]`, `[RR]`,
+`[OFF]`) was already implemented and rendering; no changes were needed to the
+badge rendering code itself.
+
+### Additional fixes (same version — appended 2026-04-05)
+
+#### Scroll of Remove Curse — TDR original behaviour (`engine/effects.py`)
+`_remove_curse()` previously cleared `cursed=False` on all inventory items
+regardless of equipped status. TDR v1.2.3 only freed currently *equipped*
+items — unequipped cursed items in the pack are unaffected. The player must
+equip a cursed item before the scroll can remove its curse. Fixed accordingly.
+
+#### Enchantment system fixes (`engine/dungeon.py`, `data/items.py`)
+
+**+4 enchantments now possible:**
+`_roll_enchant()` weight table extended with a +4 entry (1% chance).
+Adjusted weights to keep total 100: `−2:2 −1:10 0:52 +1:22 +2:8 +3:5 +4:1`.
+Previously +3 was the hard ceiling despite item data specifying `max_enchant=4`
+for all weapons and body armor.
+
+**Per-item `max_enchant` respected:**
+`_spawn()` now caps the enchant roll with `min(enchant_cap, it.get("max_enchant"))`.
+Shield/Helmet/Gloves (`max_enchant=2`) can no longer accidentally roll +3 or +4.
+Weapons and body armor (`max_enchant=4`) now use `enchant_cap=4`.
+
+#### Loot distribution fixes (`engine/dungeon.py`, `data/items.py`)
+
+**Weapon unlock formula corrected:**
+Old formula `floor//5 + 2` kept the pool at only Dagger and Leather Whip
+until floor 5. Corrected to `floor//4 + 2`:
+| Floors | Max base_dmg | Available weapons |
+|--------|-------------|-------------------|
+| 1–3    | 2           | Dagger, Leather Whip |
+| 4–7    | 3           | + Long Sword |
+| 8–11   | 4           | + Mace |
+| 12–15  | 5           | + Two-Handed Sword |
+| 16+    | 6           | + Death Blade |
+
+**Body armor guaranteed per floor:**
+Old `_spawn(IC_ARMOR, count)` drew randomly from all armor slots including
+Helmet, Gloves, Shield and Elven Cloak — making it statistically more likely
+to find an accessory than actual body armor on floors 1–7. Replaced with two
+separate spawns:
+- **1 guaranteed body armor** (slot=`armor`) from the floor-appropriate pool
+  (Leather only on floors 1–7; Chain added at floor 8; etc.)
+- **1–2 accessories** (shield, helmet, gloves, cloak) drawn from a separate
+  pool capped at base_ac ≤ 2, using `max_enchant=2` cap.
+
+## v0.500.20260405
+### Audio framework — full placeholder pipeline
+
+#### Architecture
+New module `engine/audio.py` implements `AudioManager`, a singleton that wraps
+`pygame.mixer` for both SFX and streaming music. All audio calls are
+fire-and-forget one-liners throughout the codebase; missing asset files are
+silently ignored so the game runs normally with no audio files present.
+
+#### `engine/audio.py`
+- `AudioManager` class:
+  - `_init_mixer()`: pre-inits `pygame.mixer` at 44100 Hz / 16-bit / stereo /
+    512-sample buffer; allocates 8 concurrent SFX channels.
+  - `_load_all_sfx()`: scans `assets/sounds/sfx/` at startup and pre-loads
+    every `.wav` / `.ogg` / `.mp3` found. Sound name = filename without ext.
+  - `play(name)`: fire-and-forget SFX playback. Silent if muted or file absent.
+  - `play_music(name, loops, fade_ms)`: streams from `assets/sounds/music/`,
+    tries `.ogg` / `.mp3` / `.wav`. No-ops if track already playing.
+    Default 1500 ms fade-in for smooth transitions.
+  - `stop_music(fade_ms)`: fade-out stop.
+  - `pause_music()` / `resume_music()`: called by `toggle_pause()`.
+  - `sfx_volume` / `music_volume` properties (0.0–1.0, live update).
+  - `muted` property + `toggle_mute()`: silences both channels without stopping
+    playback position.
+  - `quit()`: releases mixer on exit.
+- Module-level `get_audio()` singleton + `init_audio()` for explicit startup.
+
+#### Asset directories created
+```
+assets/sounds/sfx/      ← drop .wav/.ogg SFX files here
+assets/sounds/music/    ← drop .ogg music loops here
+```
+Both directories contain `README.txt` listing the expected filenames and events.
+
+#### SFX hooks wired (`engine/game.py`)
+| Sound name       | Trigger |
+|-----------------|---------|
+| `hit_monster`   | Player lands a blow |
+| `kill_monster`  | Monster slain |
+| `level_up`      | XP level gained |
+| `hit_player`    | Monster hits player |
+| `player_death`  | Player dies |
+| `stairs_down`   | Descend staircase |
+| `stairs_up`     | Ascend staircase |
+| `victory`       | Escaped with Orb of Carnos |
+| `boulder_push`  | Boulder pushed |
+| `gate_keeper`   | Gate Keeper spawns |
+| `pickup`        | Item picked up (both pickup functions) |
+| `equip`         | Item equipped or unequipped |
+| `curse_blocked` | Cursed item prevents equip/drop |
+| `eat_food`      | Food consumed |
+| `zap_wand`      | Wand aimed and fired |
+| `wand_empty`    | Wand out of charges |
+| `drink_potion`  | Potion consumed (beneficial) |
+| `potion_bad`    | Harmful potion consumed (confuse/blind/poison) |
+| `read_scroll`   | Scroll read |
+| `remove_curse`  | Scroll of Remove Curse used (`engine/effects.py`) |
+
+Music pauses/resumes with `toggle_pause()`.
+
+#### Music hooks wired (`ui/renderer.py`)
+| Track name        | When played |
+|------------------|-------------|
+| `title_theme`    | PHASE_TITLE |
+| `dungeon_ambient`| PHASE_PLAYING floors 1–39 |
+| `boss_floor`     | PHASE_PLAYING floor 40 |
+| `death_theme`    | PHASE_DEAD (loops=0) |
+| `victory_theme`  | PHASE_WIN (loops=0) |
+
+#### Sound toggle in Control menu (`ui/menubar.py`, `main.py`, `ui/renderer.py`)
+- "Sound" menu item given `action: "ctrl_sound"`.
+- `ctrl_sound` handler in `main.py` calls `get_audio().toggle_mute()` and logs
+  "Sound: ON/OFF." to the message panel.
+- `check_states["sound_on"]` in `renderer.render()` now reads
+  `not get_audio().muted` so the checkmark reflects live state.
+
+#### `main.py`
+- `init_audio()` called after `pygame.init()` before `GameState` construction.
+- `get_audio().quit()` called before `pygame.quit()` on exit.
+
+#### `constants.py`
+- `VERSION` bumped to `0.500.20260405`.
+
+### Hotfix (same version 0.500.20260405)
+
+#### Bug 1 — Item identification lost on drop/re-pickup (`engine/game.py`)
+`_restore_id_state()` only detected saved state via `id_state_identified`,
+`id_state_enchant_known`, or `id_state_fuzzy_id`. Wearable items with only a
+fuzzy enchant guess (`id_state_fuzzy_enchant` set, all others False/None)
+fell through the guard and triggered `_apply_expert_identify()` again on
+re-pickup — generating a new random guess and discarding the old one.
+Fix: added `id_state_fuzzy_enchant is not None` as a fourth condition.
+All four id-state markers are now checked; if any is set, state is restored.
+
+#### Bug 2 — Crash `ValueError: empty range in randrange(7, 7)` (`data/monsters.py`)
+`_dmg_dice()` returned `(count, sides)` dice notation, which was then unpacked
+as `(dmg_min, dmg_max)` in `Monster.__init__`. For monsters with high base_dmg
+at `MONSTER_DMG_POWER=1.5`, `count` exceeded `sides` (e.g. Caveman base_dmg=26
+→ scaled=39 → count=11, sides=6 → dmg_min=11, dmg_max=6), causing
+`randint(11, 6)` → `randrange(11, 7)` → ValueError. Affected: Caveman,
+Fire Lizard, Dark Wizard at current DMG_POWER.
+Fix: `_dmg_dice()` now returns a flat `(dmg_min, dmg_max)` range where
+`dmg_min = max(1, round(scaled × 0.4))` and `dmg_max = max(dmg_min+1, scaled)`.
+Always valid for `randint()`; damage ranges are sensible at all DMG_POWER values.
+
+#### Bug 3 — Stuffed movement penalty too severe (`engine/game.py`)
+The stuffed penalty triggered every other step (50% of moves wasted), making
+eating to full stomach almost as punishing as heavy encumbrance. Changed to a
+step counter that fires every 4th step instead. `_stuffed_skip` changed from
+`bool` to `int` counter; initialised and reset to `0`.
+
+### Hotfix — Caveman rebalance (same version 0.500.20260405)
+The Caveman was massively outlying compared to all other floor 2–5 monsters:
+at base_dmg=16 with MONSTER_DMG_POWER=1.5 it dealt 10–24 damage per turn
+(avg 17), killing a Banded-armor player in under 2 turns — more dangerous
+than most floor 10–15 monsters. spawn_freq=40 made it as common as Alligog.
+
+Option C applied:
+- `base_dmg` reduced from 16 → 12: scaled damage 7–18, avg 12.5/turn.
+  Still genuinely dangerous (kills unarmored player in ~3 turns) but
+  survivable with Chain/Banded armor and tactical retreat.
+- `spawn_freq` reduced from 40 → 8: rare but memorable encounter rather
+  than a constant wall. Floors 2–5 now feel appropriately progressing
+  instead of Caveman-dominated.
+
+### Hotfix — Caveman correct TDR stats (same version 0.500.20260405)
+Root cause analysis: the Caveman is at TDR data table index 15 (icon_id=415,
+0-indexed). The reference document shows its authentic stats as: 12d8 HP, AC 4,
+Atk 9, **5d5 dmg** (range 5–25, avg 15), XP 1500, Freq 40.
+
+The damage mismatch originated from the combat system translation. In TDR's
+original AC system each armor point below 10 reduced damage by 1 — so AC=4
+armor subtracted 6 from every hit, giving an effective avg of ~9 against a
+well-armored player. In our hybrid system AC=4 only subtracts 2.4, so the same
+raw damage translated far more lethally.
+
+Fix: `base_dmg` set to **7** (down from 12), which in our system produces
+raw damage 4–10 (avg 7). Against a Leather-armored player (AC=9) with 45% hit
+chance, expected damage per turn is ~3.0 — giving ~10 turns before death,
+enough to react and retreat. This replicates the TDR 5d5 intended experience.
+`spawn_freq` restored to **40** (reference value) — at this damage level the
+frequency is no longer punishing.
+
+| Armor | AC | Hit% | Avg dmg/turn | Turns to die (30 HP) |
+|-------|----|------|-------------|---------------------|
+| None  | 10 | 45%  | 3.2         | 9.5                |
+| Leather| 9 | 45% | 3.0         | 10.1               |
+| Chain | 8  | 40%  | 2.5         | 12.1               |
+| Banded| 6  | 35%  | 1.9         | 15.9               |
+| Plate | 4  | 30%  | 1.4         | 21.7               |
+
+### Hotfix — Boulder FOV, two-handed rules, Caveman XP (same version 0.500.20260405)
+
+#### Boulder no longer blocks FOV (`engine/fov.py`)
+`T_BOULDER` removed from `_OPAQUE` set. Only `T_WALL` blocks line of sight.
+Boulders are obstacles you can push, not stone walls — the player should be
+able to see monsters and items on the other side.
+
+#### Floor tile visible beneath boulder (`ui/renderer.py`)
+`_floor_spr()` no longer returns the boulder sprite directly for `T_BOULDER`
+tiles. Instead the floor tile (checkerboard light/grey) is rendered first, then
+`_boulder_overlay()` blits the boulder sprite on top. The stone floor is now
+visible under the boulder as it should be.
+
+#### Two-handed weapons block offhand slot (`engine/game.py`)
+`equip_item()` now enforces the `hands=2` field on weapons:
+- Equipping a two-handed weapon with an offhand item already worn: the offhand
+  is force-unequipped (with a log message) unless it is cursed, in which case
+  the equip is blocked entirely.
+- Equipping any offhand item while a two-handed weapon is wielded: blocked with
+  message "You need both hands for the X — you cannot use an offhand item."
+The Death Blade (`hands=1`) is unaffected; only `two_handed_sword` has `hands=2`
+in the current item table.
+
+#### Caveman XP rebalanced (`data/monsters.py`)
+`base_xp` reduced from 1500 → 250 (scaled value 450 → 75 at `MONSTER_XP_POWER=0.3`).
+At its reworked `base_dmg=7` power level the Caveman is comparable to a tough
+floor-5 monster like Zambit (58 XP) or Giant Spider (36 XP). The premium of 75
+acknowledges its higher HP and `immune_fire` tag while no longer granting early
+game-distorting XP gains.
