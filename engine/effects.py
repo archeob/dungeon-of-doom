@@ -392,27 +392,48 @@ def fire_wand_at_direction(game, item: dict, dx: int, dy: int) -> tuple:
 
     elif eff == "wand_polymorph":
         if target:
-            from data.monsters import monsters_for_floor
-            pool = monsters_for_floor(game.floor)
+            from data.monsters import MONSTERS
+            # Find the target's approximate "level" by its min_floor
+            try:
+                orig_data  = next(m for m in MONSTERS if m["id"] == target.id)
+                orig_level = orig_data["min_floor"]
+            except StopIteration:
+                orig_level = game.floor
+
+            # Build pool: different monster type, min_floor within ±10 of original
+            pool = [
+                m for m in MONSTERS
+                if m["id"] != target.id
+                and abs(m["min_floor"] - orig_level) <= 10
+            ]
+            # Fallback: any monster that isn't the same type
+            if not pool:
+                pool = [m for m in MONSTERS if m["id"] != target.id]
+
             if pool:
-                new_m = game.rng.choice(pool)
+                new_m    = game.rng.choice(pool)
                 old_name = target.name
                 hp_ratio = target.hp / max(1, target.max_hp)
-                target.id    = new_m["id"]
-                target.name  = new_m["name"]
-                target.glyph = new_m["glyph"]
-                target.color = new_m.get("color_hint", new_m.get("color", (200,200,200)))
+                target.id          = new_m["id"]
+                target.name        = new_m["name"]
+                target.glyph       = new_m["glyph"]
+                target.color       = new_m.get("color_hint", (200, 200, 200))
+                target.special     = list(new_m["special"])
                 target.dmg_min, target.dmg_max = new_m["damage"]
-                target.ac    = new_m["ac"]
-                target.xp    = new_m["xp"]
+                target.ac          = new_m["ac"]
+                target.atk         = new_m["atk"]
+                target.num_attacks = new_m.get("num_attacks", 1)
+                target.xp          = new_m["xp"]
+                target.loot_chance = new_m["loot_chance"]
                 if new_m.get("hp_fixed") is not None:
                     new_max_hp = new_m["hp_fixed"]
                 else:
                     n, s = new_m["hp_dice"]
                     new_max_hp = max(1, sum(game.rng.randint(1, s) for _ in range(n)))
                 target.max_hp = new_max_hp
-                target.hp    = max(1, int(new_max_hp * hp_ratio))
-                msg = f"The {old_name} transforms into a {target.name}!"; col = C_LTEXT_ACCENT
+                target.hp     = max(1, int(new_max_hp * hp_ratio))
+                msg = f"The {old_name} transforms into a {target.name}!"
+                col = C_LTEXT_ACCENT
         else:
             msg = "The beam dissipates."; col = C_LTEXT_DIM
 
